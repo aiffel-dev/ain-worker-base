@@ -23,7 +23,7 @@ const Name = {
 };
 
 class CustomError extends Error {
-  private statusCode: number;
+  public statusCode: number;
 
   constructor(statusCode: number, message: string) {
     super(message);
