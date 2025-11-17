@@ -17,7 +17,7 @@ export function replaceFileSync(filePath: string, value: any) {
   const filePathList = filePath.split("/");
   const rootPath = filePathList.slice(0, filePathList.length - 1).join("/");
   if (!fileExists(rootPath)) {
-    fs.mkdirSync(rootPath);
+    fs.mkdirSync(rootPath, { recursive: true });
   }
   if (!fileExists(filePath)) {
     fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
@@ -37,9 +37,7 @@ export async function getGpuInfo(): Promise<types.GPUInfo> {
     const result = {};
     let idx = 0;
     for (const info of infoList) {
-      const dataList = info
-        .split(",")
-        .map((item: string) => item.replace(" ", ""));
+      const dataList = info.split(",").map((item: string) => item.trim());
       result[String(idx)] = {
         gpuName: dataList[0],
         driverVersion: dataList[1],
