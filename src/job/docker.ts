@@ -54,7 +54,7 @@ async function createContainer(
   const containerId = getRandomRequestId();
   const { ports, envs, command, imagePath, downloadFileRef, uploadFileName } =
     params;
-  if (!constants.NODE_PORT_IP && ports) {
+  if (!constants.NODE_PORT_IP && ports && Object.keys(ports).length > 0) {
     throw new CustomError(ErrorCode.NOT_SUPPORTED, "ENDPOINT Not Supported");
   }
 

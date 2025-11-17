@@ -1,0 +1,632 @@
+import Docker from '../../../src/util/docker';
+import { CustomError } from '../../../src/common/error';
+
+// Mock Dockerode
+jest.mock('dockerode');
+import Dockerode from 'dockerode';
+const MockDockerode = Dockerode as jest.MockedClass<typeof Dockerode>;
+
+describe('Docker Class', () => {
+  let docker: Docker;
+  let mockDockerode: any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    // Setup mock dockerode instance
+    mockDockerode = {
+      createContainer: jest.fn(),
+      getContainer: jest.fn(),
+      listContainers: jest.fn(),
+      pull: jest.fn(),
+      getImage: jest.fn(),
+      modem: {
+        followProgress: jest.fn((stream: any, onFinished: any) => {
+          onFinished(null);
+          return Promise.resolve();
+        }),
+      },
+    };
+
+    MockDockerode.mockImplementation(() => mockDockerode);
+
+    // Get fresh instance
+    docker = Docker.getInstance();
+  });
+
+  describe('Singleton Pattern', () => {
+    it('should return same instance on multiple calls', () => {
+      const instance1 = Docker.getInstance();
+      const instance2 = Docker.getInstance();
+
+      expect(instance1).toBe(instance2);
+    });
+
+    it('should initialize with empty state', () => {
+      const containerInfo = docker.getContainerInfoDict();
+      expect(Object.keys(containerInfo).length).toBe(0);
+    });
+  });
+
+  describe('init()', () => {
+    beforeEach(() => {
+      mockDockerode.listContainers.mockResolvedValue([]);
+    });
+
+    it('should initialize port allocation from environment variable', async () => {
+      process.env.CONTAINER_ALLOW_PORT = '8000-8002,9000';
+
+      await docker.init('test-label');
+
+      // Verify initialization completed
+      expect(mockDockerode.listContainers).toHaveBeenCalled();
+    });
+
+    it('should initialize GPU device allocation', async () => {
+      process.env.GPU_DEVICE_NUMBER = '0,1';
+
+      await docker.init('test-label');
+
+      expect(mockDockerode.listContainers).toHaveBeenCalled();
+    });
+
+    it('should load existing containers on initialization', async () => {
+      const mockContainers = [
+        {
+          Id: 'container-1',
+          Names: ['/test-container-1'],
+          Image: 'ubuntu:18.04',
+          Ports: [{ PublicPort: 8080 }],
+          Labels: { 'test-label': 'value' },
+        },
+      ];
+
+      mockDockerode.listContainers.mockResolvedValue(mockContainers);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          HostConfig: {
+            DeviceRequests: [{ DeviceIDs: ['0'] }],
+          },
+        }),
+      });
+
+      await docker.init('test-label');
+
+      expect(mockDockerode.listContainers).toHaveBeenCalledWith({
+        all: true,
+        filters: {
+          label: ['test-label'],
+        },
+      });
+    });
+
+    it('should check GPU support when GPU_DEVICE_NUMBER is set', async () => {
+      process.env.GPU_DEVICE_NUMBER = '0';
+
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+      mockDockerode.listContainers.mockResolvedValue([]);
+
+      await docker.init('test-label');
+
+      // GPU check should have been performed
+      expect(mockDockerode.createContainer).toHaveBeenCalled();
+    });
+
+    it('should throw error when GPU not supported', async () => {
+      process.env.GPU_DEVICE_NUMBER = '0';
+
+      mockDockerode.createContainer.mockRejectedValue(
+        new Error('GPU not available')
+      );
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+      mockDockerode.listContainers.mockResolvedValue([]);
+
+      await expect(docker.init('test-label')).rejects.toThrow(CustomError);
+    });
+  });
+
+  describe('run()', () => {
+    beforeEach(async () => {
+      process.env.CONTAINER_ALLOW_PORT = '8000-8005';
+      process.env.GPU_DEVICE_NUMBER = '0,1';
+      mockDockerode.listContainers.mockResolvedValue([]);
+      await docker.init('test-label');
+    });
+
+    it('should create and start container successfully', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      const result = await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 0,
+        },
+      });
+
+      expect(mockDockerode.createContainer).toHaveBeenCalled();
+      expect(mockContainer.start).toHaveBeenCalled();
+      expect(result).toBeDefined();
+    });
+
+    it('should throw error if container already exists', async () => {
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          Id: 'existing-container',
+        }),
+      });
+
+      await expect(
+        docker.run({
+          imagePath: 'ubuntu:18.04',
+          containerId: 'test-container',
+          ports: [],
+          command: ['echo', 'test'],
+          resourceLimit: {
+            vcpu: 2,
+            memoryGB: 4,
+            gpuCnt: 0,
+          },
+        })
+      ).rejects.toThrow(CustomError);
+    });
+
+    it('should allocate ports correctly', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      const result = await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [3000, 4000],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 0,
+        },
+      });
+
+      expect(result.publishPorts).toBeDefined();
+      expect(Object.keys(result.publishPorts).length).toBe(2);
+    });
+
+    it('should throw error when port limit exceeded', async () => {
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockRejectedValue(new Error('not found')),
+      });
+
+      await expect(
+        docker.run({
+          imagePath: 'ubuntu:18.04',
+          containerId: 'test-container',
+          ports: [3000, 4000, 5000, 6000], // Too many ports
+          command: ['echo', 'test'],
+          resourceLimit: {
+            vcpu: 2,
+            memoryGB: 4,
+            gpuCnt: 0,
+          },
+        })
+      ).rejects.toThrow(CustomError);
+    });
+
+    it('should allocate GPU devices when requested', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 1,
+        },
+      });
+
+      const createCall = mockDockerode.createContainer.mock.calls[0][0];
+      expect(createCall.HostConfig.DeviceRequests).toBeDefined();
+      expect(createCall.HostConfig.DeviceRequests[0].DeviceIDs.length).toBe(1);
+    });
+
+    it('should set CPU affinity correctly', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 0,
+        },
+      });
+
+      const createCall = mockDockerode.createContainer.mock.calls[0][0];
+      expect(createCall.HostConfig.CpusetCpus).toBeDefined();
+      expect(createCall.HostConfig.CpusetCpus).toMatch(/\d+-\d+/);
+    });
+
+    it('should cleanup resources on container creation failure', async () => {
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockRejectedValue(new Error('not found')),
+      });
+      mockDockerode.createContainer.mockRejectedValue(
+        new Error('Container creation failed')
+      );
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await expect(
+        docker.run({
+          imagePath: 'ubuntu:18.04',
+          containerId: 'test-container',
+          ports: [3000],
+          command: ['echo', 'test'],
+          resourceLimit: {
+            vcpu: 2,
+            memoryGB: 4,
+            gpuCnt: 1,
+          },
+        })
+      ).rejects.toThrow();
+
+      // Ports and GPU should be released
+      const containerInfo = docker.getContainerInfoDict();
+      expect(containerInfo['test-container']).toBeUndefined();
+    });
+
+    it('should handle environment variables', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [],
+        envs: {
+          TEST_VAR: 'test-value',
+          ANOTHER_VAR: 'another-value',
+        },
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 0,
+        },
+      });
+
+      const createCall = mockDockerode.createContainer.mock.calls[0][0];
+      expect(createCall.Env).toContain('TEST_VAR=test-value');
+      expect(createCall.Env).toContain('ANOTHER_VAR=another-value');
+    });
+
+    it('should handle volume binds', async () => {
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [],
+        binds: ['/host/path:/container/path'],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 0,
+        },
+      });
+
+      const createCall = mockDockerode.createContainer.mock.calls[0][0];
+      expect(createCall.HostConfig.Binds).toContain('/host/path:/container/path');
+    });
+  });
+
+  describe('kill()', () => {
+    beforeEach(async () => {
+      process.env.CONTAINER_ALLOW_PORT = '8000-8005';
+      process.env.GPU_DEVICE_NUMBER = '0,1';
+      mockDockerode.listContainers.mockResolvedValue([]);
+      await docker.init('test-label');
+
+      // Create a container first
+      const mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+      mockDockerode.createContainer.mockResolvedValue(mockContainer);
+      mockDockerode.getContainer.mockReturnValue({
+        inspect: jest.fn().mockResolvedValue({
+          State: { Running: false },
+        }),
+      });
+      mockDockerode.pull.mockImplementation((image: string, opts: any, cb: any) => {
+        cb(null, {});
+      });
+
+      await docker.run({
+        imagePath: 'ubuntu:18.04',
+        containerId: 'test-container',
+        ports: [3000],
+        command: ['echo', 'test'],
+        resourceLimit: {
+          vcpu: 2,
+          memoryGB: 4,
+          gpuCnt: 1,
+        },
+        labels: {
+          'request-id': 'test-request-id',
+        },
+      });
+    });
+
+    it('should kill and remove container successfully', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({
+          Config: {
+            Labels: {
+              'request-id': 'test-request-id',
+            },
+          },
+        }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      const requestId = await docker.kill('test-container');
+
+      expect(mockContainer.remove).toHaveBeenCalledWith({ force: true });
+      expect(requestId).toBe('test-request-id');
+    });
+
+    it('should release ports after killing container', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({
+          Config: {
+            Labels: {},
+          },
+        }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      await docker.kill('test-container');
+
+      // Container should be removed from internal tracking
+      const containerInfo = docker.getContainerInfoDict();
+      expect(containerInfo['test-container']).toBeUndefined();
+    });
+
+    it('should release GPU devices after killing container', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({
+          Config: {
+            Labels: {},
+          },
+        }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      await docker.kill('test-container');
+
+      // GPU should be available again
+      const containerInfo = docker.getContainerInfoDict();
+      expect(containerInfo['test-container']).toBeUndefined();
+    });
+
+    it('should throw error if container does not exist', async () => {
+      await expect(docker.kill('non-existent-container')).rejects.toThrow(
+        CustomError
+      );
+    });
+
+    it('should validate labels when allowLabels provided', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({
+          Config: {
+            Labels: {
+              owner: 'user1',
+            },
+          },
+        }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      await expect(
+        docker.kill('test-container', { owner: 'user2' })
+      ).rejects.toThrow(CustomError);
+    });
+
+    it('should succeed when allowLabels match', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({
+          Config: {
+            Labels: {
+              owner: 'user1',
+              'request-id': 'test-request-id',
+            },
+          },
+        }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      const requestId = await docker.kill('test-container', { owner: 'user1' });
+
+      expect(requestId).toBe('test-request-id');
+    });
+  });
+
+  describe('exec()', () => {
+    it('should execute command in container', async () => {
+      const mockExec = {
+        start: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const mockContainer = {
+        exec: jest.fn().mockResolvedValue(mockExec),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      await docker.exec('test-container', 'ls -la');
+
+      expect(mockContainer.exec).toHaveBeenCalledWith({
+        Cmd: ['/bin/bash', '-c', 'ls -la'],
+        AttachStderr: true,
+        AttachStdout: true,
+      });
+      expect(mockExec.start).toHaveBeenCalled();
+    });
+  });
+
+  describe('getContainerInfo()', () => {
+    it('should return container information', async () => {
+      const mockInspectData = {
+        Id: 'test-id',
+        Name: '/test-container',
+        State: { Running: true },
+      };
+
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue(mockInspectData),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      const info = await docker.getContainerInfo('test-container');
+
+      expect(mockContainer.inspect).toHaveBeenCalled();
+      expect(info).toMatchObject(mockInspectData);
+    });
+  });
+
+  describe('existContainer()', () => {
+    it('should return true when container exists', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockResolvedValue({ Id: 'test-id' }),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      const exists = await docker.existContainer('test-container');
+
+      expect(exists).toBe(true);
+    });
+
+    it('should return false when container does not exist', async () => {
+      const mockContainer = {
+        inspect: jest.fn().mockRejectedValue(new Error('not found')),
+      };
+
+      mockDockerode.getContainer.mockReturnValue(mockContainer);
+
+      const exists = await docker.existContainer('test-container');
+
+      expect(exists).toBe(false);
+    });
+  });
+
+  describe('getContainerCnt()', () => {
+    it('should return container count', () => {
+      const count = docker.getContainerCnt();
+      expect(typeof count).toBe('number');
+      expect(count).toBeGreaterThanOrEqual(0);
+    });
+  });
+});

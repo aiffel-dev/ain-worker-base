@@ -43,7 +43,6 @@ export type DockerRunParams = {
 };
 
 export type CreateContainer = {
-  containerId: string;
   imagePath: string;
   envs?: { [key: string]: string };
   command?: string[];

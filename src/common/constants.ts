@@ -52,8 +52,8 @@ export const LABEL_KEY_FOR_UPLOAD_FILE_NAME = "AinConnect.uploadFileName";
 
 export const CONTAINER_MAX_CNT = process.env.CONTAINER_MAX_CNT || 1;
 export const CONTAINER_VCPU = process.env.CONTAINER_VCPU || 1;
-export const CONTAINER_MEMORY_GB = process.env.CONTAINER_MAX_CNT || 4;
-export const DISK_GB = process.env.CONTAINER_MAX_CNT || 50;
+export const CONTAINER_MEMORY_GB = process.env.CONTAINER_MEMORY_GB || 4;
+export const DISK_GB = process.env.DISK_GB || 50;
 
 export const validateConstants = () => {
   let checkData = {
